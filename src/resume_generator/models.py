@@ -376,7 +376,7 @@ def default_link_library_path(source_path: str) -> str:
     return str(source_file.with_name(f"{source_file.stem}.resume-links.json"))
 
 
-def merge_source_document(current: SourceFile, template: SourceFile | None = None) -> SourceFile:
+def merge_source_document(current: SourceFile, template: "ResumeDocument | None" = None) -> SourceFile:
     if template is None:
         return SourceFile.from_dict(current.to_dict()) or current
 
@@ -495,13 +495,33 @@ class LinkLibrary:
         validate_generated_subset(self.source_file, generated_file)
         self.links[generated_file.path] = generated_file
 
+    def remove_generated_file(self, path: str, delete_from_disk: bool = True) -> None:
+        """Drop a generated file from the library and optionally delete it on disk.
+
+        The library entry is always cleared, even when the underlying files are
+        already missing (orphaned rows). If ``delete_from_disk`` is set and a file
+        exists but cannot be removed, an ``OSError`` is raised before the library
+        entry is dropped so callers can surface the failure.
+        """
+        normalized = _normalize_path(path)
+        generated_file = self.links.get(normalized) or self.links.get(path)
+
+        if delete_from_disk and generated_file is not None:
+            for target in (generated_file.path, generated_file.pdf_path):
+                if not target:
+                    continue
+                Path(target).unlink(missing_ok=True)
+
+        self.links.pop(normalized, None)
+        self.links.pop(path, None)
+
     def create_generated_file(
         self,
         output_path: str,
         template: GeneratedFile | None = None,
         generate_pdf: bool = False,
     ) -> GeneratedFile:
-        from assembler import assemble, compile_pdf, write_tex
+        from .assembler import assemble, compile_pdf, write_tex
 
         source = self.source_file
         template_sections = {section.name: section for section in template.sections} if template else {}
