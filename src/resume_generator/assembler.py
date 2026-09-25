@@ -24,6 +24,51 @@ def assemble(doc: ResumeDocument) -> str:
     return ''.join(parts)
 
 
+def assemble_source(doc: ResumeDocument) -> str:
+    """Rebuild a master .tex file from the snapshot.
+
+    Unlike ``assemble``, this keeps every section and every version, including
+    entries the user has unchecked. Skills versions whose ``@item`` comment was
+    stored separately from ``raw_text`` get that comment written back so a
+    later parse recovers the same item and version ids.
+    """
+    parts = [doc.preamble, doc.header]
+    for section in doc.sections:
+        parts.append(section.raw_header)
+        parts.append(section.list_prefix)
+        first_version = True
+        for entry in section.entries:
+            for version in entry.versions:
+                parts.append(
+                    _source_version_text(
+                        section,
+                        entry,
+                        version,
+                        markers_already_present=first_version
+                        and f"@item: {entry.item_id}" in section.list_prefix,
+                    )
+                )
+                first_version = False
+        parts.append(section.list_suffix)
+    parts.append(doc.trailing)
+    return ''.join(parts)
+
+
+def _source_version_text(
+    section,
+    entry,
+    version,
+    *,
+    markers_already_present: bool,
+) -> str:
+    raw = version.raw_text
+    if section.section_type != "skills":
+        return raw
+    if "@item:" in raw or markers_already_present:
+        return raw
+    return f"% @item: {entry.item_id}\n% @version: {version.version_id}\n{raw}"
+
+
 def parse_and_assemble_source(source_path: str) -> tuple[SourceFile, str]:
     """Parse source via persistence integration and return (doc, assembled_tex)."""
     doc = parse_file(source_path)

@@ -9,7 +9,7 @@ The application focuses on two persistent artifacts:
 
 ## What The App Does
 
-The GUI lets you load either a source resume or an existing link library, inspect the parsed sections and entries, choose what should stay in the output, and then write a new generated `.tex` file. Each generated file is recorded in the link library so the source and its outputs stay connected over time.
+The GUI lets you start a new link library from a source resume, or open an existing library, inspect the parsed sections and entries, choose what should stay in the output, and then write a new generated `.tex` file. Each generated file is recorded in the link library so the source and its outputs stay connected over time.
 
 ## Assumptions
 
@@ -22,25 +22,27 @@ This project assumes:
 ## How To Use The GUI
 
 1. Launch the app.
-2. Click `Upload Source File` and choose a `.tex` resume.
+2. To start a new library, click `Upload File`, choose `Source File`, and open a `.tex` resume. This drops any library already open in the app.
 3. Review the parsed sections in the left panel.
 4. Toggle section and entry checkboxes to choose what should appear in the output.
-5. Click `Update Links` to save or refresh the link library for the current source.
-6. Click `Generate` to create a new generated `.tex` file and register it in the link library.
-7. If you already have a saved link library, click `Upload Link Library` instead of starting from scratch.
-8. After loading a link library, the app restores the associated source file and its saved generated-file history.
+5. Click `Generate` to create a new generated `.tex` file, register it in a new link library, and save that library beside the source.
+6. Click `Update Links` to refresh an existing library's source snapshot without creating a new output file.
+7. To continue an existing library, click `Upload File`, choose `Link Library`, and open its `.resume-links.json`. This is the only way to restore generated files.
+8. After loading a link library, the app restores the saved source snapshot and generated-file history. If those paths are missing, use `Remake Files` to write them somewhere on this machine.
 
 ### UI Behavior
 
-- `Upload Source File` loads and parses a source resume.
-- `Upload Link Library` loads a saved link library and reconnects it to its source file when possible.
-- `Update Links` saves the current source snapshot into the library without creating a new output file.
+- `Upload File` → `Source File` parses a source resume and starts a new library session. It does not open an existing library, including a sibling `.resume-links.json`.
+- `Upload File` → `Link Library` loads a saved link library and reconnects it to its source file when that file exists.
+- `Update Links` saves the current source snapshot into the open library without creating a new output file.
 - `Generate` creates a new output file using the current selections and stores a matching generated-file entry in the library.
+- The first Generate on a new session writes `{stem}.resume-links.json` next to the source. If that file already exists, the app asks before replacing it.
+- `Remake Files` rewrites the open library's source and generated files to new locations and updates that same JSON file.
 - The app shows the currently loaded source file and library file in the top bar.
 
 ### Where The File Is Stored
 
-The default library path is derived from the source file name and stored alongside the source file. For a source file like `resume.tex`, the default library becomes `resume.resume-links.json` in the same folder.
+A new library is saved beside the source file. For a source file like `resume.tex`, that path is `resume.resume-links.json` in the same folder. Opening the source again does not load this file; open the JSON itself to continue the library.
 
 #### resume-links.json
 
@@ -48,7 +50,7 @@ The JSON snapshot is the source of truth for the relationship between one master
 
 ### How Updates Work
 
-- Loading a source file creates an in-memory `SourceFile`.
-- Clicking `Update Links` writes the current source snapshot into the link library JSON file.
-- Clicking `Generate` creates a new `GeneratedFile`, writes it to disk as `.tex`, adds it to the link library, and saves the updated JSON file.
-- If the source file is reopened after a link library has been loaded, the app preserves the saved selection state where possible.
+- Loading a source file creates an in-memory `SourceFile` and clears any open library.
+- Clicking `Update Links` writes the current source snapshot into the open link library JSON file.
+- Clicking `Generate` creates a new `GeneratedFile`, writes it to disk as `.tex`, adds it to the link library, and saves the JSON file.
+- The first save of a new library uses the sibling `.resume-links.json` path. Replacing an existing file there requires confirmation, and that is when the previous library becomes obsolete.
