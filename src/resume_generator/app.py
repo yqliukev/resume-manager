@@ -5,9 +5,10 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from .models import (
+    GeneratedFile,
     SourceFile,
     LinkLibrary,
-    merge_source_document,
+    build_generated_file,
     default_link_library_path,
 )
 from .parser import parse_file
@@ -29,10 +30,10 @@ class App(ctk.CTk):
 
         # Canonical parsed source document (never mutated by an edit session).
         self.source_doc: SourceFile | None = None
-        # Document currently bound to the tree. Equals source_doc while creating
-        # a new file, or a working clone with a generated file's selections while
-        # editing an existing one.
-        self.doc: SourceFile | None = None
+        # Draft bound to the tree while the editor is open: fresh from the source
+        # when creating a new file, or carrying an existing file's selections
+        # when editing one. None outside the editor.
+        self.doc: GeneratedFile | None = None
         self.file_path: str | None = None
         self.link_library: LinkLibrary | None = None
         self.library_path: str | None = None
@@ -364,7 +365,7 @@ class App(ctk.CTk):
         self.library_path = None
         self.library_label.configure(text="Library: none")
 
-        self.doc = self.source_doc
+        self.doc = None
         self.editing_path = None
         self.file_path = source_path
         self.file_label.configure(text=f"Source: {source_path}")
@@ -395,7 +396,6 @@ class App(ctk.CTk):
             return
 
         in_editor = self.current_view == "editor"
-        editing_path = self.editing_path
         # Capture any in-progress selections before we discard the old structure.
         if in_editor:
             self._sync_model()
@@ -411,21 +411,14 @@ class App(ctk.CTk):
 
         self._pending_warnings = list(getattr(parsed_source, "parse_warnings", []))
 
-        source_template = (
-            self.link_library.source_file if self.link_library is not None else None
-        )
-        new_source = merge_source_document(parsed_source, source_template)
-        self.source_doc = new_source
+        self.source_doc = parsed_source
         self.file_label.configure(text=f"Source: {self.file_path}")
 
         if in_editor:
             # Re-apply the in-progress UI selections onto the new structure.
-            self.doc = merge_source_document(new_source, prev_working)
-            if editing_path is None:
-                self.source_doc = self.doc
+            self.doc = build_generated_file(parsed_source, prev_working)
             self._build_tree()
         else:
-            self.doc = self.source_doc
             self._refresh_file_list()
 
         self._update_control_states()
@@ -452,9 +445,8 @@ class App(ctk.CTk):
         self._pending_warnings = []
         if source_path and os.path.exists(source_path):
             try:
-                parsed_source = parse_file(source_path)
-                self._pending_warnings = list(getattr(parsed_source, "parse_warnings", []))
-                loaded_source = merge_source_document(parsed_source, library.source_file)
+                loaded_source = parse_file(source_path)
+                self._pending_warnings = list(getattr(loaded_source, "parse_warnings", []))
             except Exception:
                 loaded_source = None
                 self._pending_warnings = []
@@ -465,7 +457,7 @@ class App(ctk.CTk):
         self.link_library = library
         self.library_path = os.path.abspath(path)
         self.source_doc = loaded_source
-        self.doc = loaded_source
+        self.doc = None
         self.editing_path = None
 
         if source_path:
@@ -584,7 +576,7 @@ class App(ctk.CTk):
         # If this file is open in the editor, drop that edit session first.
         if self.editing_path is not None and os.path.abspath(self.editing_path) == os.path.abspath(path):
             self.editing_path = None
-            self.doc = self.source_doc
+            self.doc = None
             self._show_manage_view()
 
         try:
@@ -611,7 +603,7 @@ class App(ctk.CTk):
             return
 
         self.editing_path = None
-        self.doc = self.source_doc
+        self.doc = build_generated_file(self.source_doc)
         self.mode_label.configure(text="New file")
         self.output_fields_frame.grid()
         self._set_default_output_fields(self.file_path)
@@ -631,8 +623,7 @@ class App(ctk.CTk):
             self._refresh_file_list()
             return
 
-        # Build a working source clone carrying this file's saved selections.
-        self.doc = merge_source_document(self.source_doc, gen_file)
+        self.doc = build_generated_file(self.source_doc, gen_file)
         self.editing_path = path
         self.mode_label.configure(text=f"Editing: {os.path.basename(path)}")
         self.output_fields_frame.grid_remove()
@@ -644,9 +635,9 @@ class App(ctk.CTk):
         self._set_status(f"Editing {os.path.basename(path)}")
 
     def _back_to_list(self):
-        # Discard unsaved checkbox changes by pointing back at the source doc.
+        # Discard unsaved checkbox changes by dropping the draft.
         self.editing_path = None
-        self.doc = self.source_doc
+        self.doc = None
         self._show_manage_view()
         self._set_status("Ready")
 
@@ -949,8 +940,6 @@ class App(ctk.CTk):
             messagebox.showwarning("No source file", "Please upload a source file first.")
             return
 
-        # In create mode self.doc is the source doc, so syncing stores the
-        # current selections as the source default snapshot.
         self._sync_model()
 
         output_dir = self.output_dir_entry.get().strip()
@@ -985,7 +974,9 @@ class App(ctk.CTk):
 
         output_path = os.path.join(output_dir, output_name)
         try:
-            generated_file = library.create_generated_file(output_path, generate_pdf=generate_pdf)
+            generated_file = library.create_generated_file(
+                output_path, template=self.doc, generate_pdf=generate_pdf
+            )
             library.add_generated_file(generated_file)
             saved_path = save_link_library(library, self.library_path)
         except Exception as exc:
@@ -1231,7 +1222,7 @@ class App(ctk.CTk):
             self._set_status(f"Error: {exc}")
             return False
         self.source_doc = self.link_library.source_file
-        self.doc = self.source_doc
+        self.doc = None
         self.editing_path = None
         self.file_path = written
         self.file_label.configure(text=f"Source: {written}")

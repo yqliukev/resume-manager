@@ -36,6 +36,7 @@ This project assumes:
 - `Upload File` → `Link Library` loads a saved link library and reconnects it to its source file when that file exists.
 - `Update Links` saves the current source snapshot into the open library without creating a new output file.
 - `Generate` creates a new output file using the current selections and stores a matching generated-file entry in the library.
+- Every new file starts with all sections and entries selected, using the first version of each item as written in the source. Selections are saved only on generated files; the source snapshot holds no selection state.
 - The first Generate on a new session writes `{stem}.resume-links.json` next to the source. If that file already exists, the app asks before replacing it.
 - `Remake Files` rewrites the open library's source and generated files to new locations and updates that same JSON file.
 - The app shows the currently loaded source file and library file in the top bar.
