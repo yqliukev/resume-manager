@@ -52,6 +52,7 @@ class App(ctk.CTk):
         self._version_radio_refs: list = []
 
         self._pending_warnings: list[str] = []
+        self._remake_rows: list[dict] = []
 
         self._build_ui()
         self._show_manage_view()
@@ -86,9 +87,10 @@ class App(ctk.CTk):
         self.library_label = ctk.CTkLabel(top, text="Library: none", anchor="w")
         self.library_label.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
 
-        # ── View container (manage view + editor view share this cell) ─
+        # ── View container (manage, editor, and remake share this cell) ─
         self._build_manage_view()
         self._build_editor_view()
+        self._build_remake_view()
 
         # ── Status footer (shared by both views) ──────────────────────
         footer = ctk.CTkFrame(self, corner_radius=0)
@@ -125,6 +127,11 @@ class App(ctk.CTk):
             actions, text="Update Links", width=140, command=self._update_links
         )
         self.update_links_btn.grid(row=0, column=1, padx=(0, 8), sticky="w")
+
+        self.remake_btn = ctk.CTkButton(
+            actions, text="Remake Files", width=140, command=self._enter_remake_mode
+        )
+        self.remake_btn.grid(row=0, column=2, padx=(0, 8), sticky="w")
 
     def _build_editor_view(self):
         self.editor_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -218,6 +225,50 @@ class App(ctk.CTk):
         )
         self.action_btn.grid(row=1, column=2, padx=(4, 10), pady=(4, 8), sticky="e")
 
+    def _build_remake_view(self):
+        self.remake_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.remake_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
+        self.remake_frame.grid_columnconfigure(0, weight=1)
+        self.remake_frame.grid_rowconfigure(2, weight=1)
+
+        header = ctk.CTkFrame(self.remake_frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        header.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkButton(
+            header, text="← Back", width=90, command=self._back_to_list
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+        ctk.CTkLabel(
+            header, text="Remake files", anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=0, column=1, sticky="ew")
+
+        ctk.CTkLabel(
+            self.remake_frame,
+            text=(
+                "Choose a new location for the source and each generated file. "
+                "The opened link library is updated in place."
+            ),
+            anchor="w",
+            justify="left",
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 4))
+
+        self.remake_list_frame = ctk.CTkScrollableFrame(
+            self.remake_frame,
+            label_text="Files to remake",
+            label_font=ctk.CTkFont(weight="bold"),
+        )
+        self.remake_list_frame.grid(row=2, column=0, sticky="nsew")
+        self.remake_list_frame.grid_columnconfigure(0, weight=1)
+
+        actions = ctk.CTkFrame(self.remake_frame, fg_color="transparent")
+        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ctk.CTkButton(
+            actions, text="Write All", width=140, command=self._write_all_remakes
+        ).grid(row=0, column=0, sticky="w")
+
     # ------------------------------------------------------------------
     # View switching
     # ------------------------------------------------------------------
@@ -225,12 +276,20 @@ class App(ctk.CTk):
     def _show_manage_view(self):
         self.current_view = "manage"
         self.editor_frame.grid_remove()
+        self.remake_frame.grid_remove()
         self.manage_frame.grid()
 
     def _show_editor_view(self):
         self.current_view = "editor"
         self.manage_frame.grid_remove()
+        self.remake_frame.grid_remove()
         self.editor_frame.grid()
+
+    def _show_remake_view(self):
+        self.current_view = "remake"
+        self.manage_frame.grid_remove()
+        self.editor_frame.grid_remove()
+        self.remake_frame.grid()
 
     # ------------------------------------------------------------------
     # File open
@@ -298,19 +357,12 @@ class App(ctk.CTk):
         self._pending_warnings = list(getattr(parsed_source, "parse_warnings", []))
         source_path = os.path.abspath(path)
 
-        # Resolve which link library (if any) belongs to this source.
-        library = self._resolve_library_for_source(source_path)
-
-        if library is not None:
-            self.link_library = library
-            self.source_doc = merge_source_document(parsed_source, library.source_file)
-            if self.library_path:
-                self.library_label.configure(text=f"Library: {self.library_path}")
-        else:
-            self.source_doc = parsed_source
-            self.link_library = None
-            self.library_path = None
-            self.library_label.configure(text="Library: none")
+        # A source upload starts a new library. An existing library is resumed
+        # only by opening its JSON file.
+        self.source_doc = parsed_source
+        self.link_library = None
+        self.library_path = None
+        self.library_label.configure(text="Library: none")
 
         self.doc = self.source_doc
         self.editing_path = None
@@ -324,35 +376,6 @@ class App(ctk.CTk):
         self._show_manage_view()
         self._update_control_states()
         return True
-
-    def _resolve_library_for_source(self, source_path: str) -> LinkLibrary | None:
-        """Return the link library associated with source_path, if available.
-
-        Prefers an already-loaded library pointing at the same source, otherwise
-        auto-loads the sibling ``{stem}.resume-links.json`` when it exists and
-        references this source file.
-        """
-        if self.link_library is not None and self._same_source(
-            self.link_library, source_path
-        ):
-            return self.link_library
-
-        default_lib = default_link_library_path(source_path)
-        if default_lib and os.path.exists(default_lib):
-            try:
-                candidate = load_link_library(default_lib)
-            except Exception:
-                return None
-            if self._same_source(candidate, source_path):
-                self.library_path = os.path.abspath(default_lib)
-                return candidate
-        return None
-
-    @staticmethod
-    def _same_source(library: LinkLibrary, source_path: str) -> bool:
-        target = os.path.abspath(source_path)
-        candidates = {library.source_path, library.source_file.path}
-        return any(os.path.abspath(c) == target for c in candidates if c)
 
     def _open_source_file(self):
         path = filedialog.askopenfilename(
@@ -459,9 +482,12 @@ class App(ctk.CTk):
         self._set_default_output_fields(source_path)
 
         self._refresh_file_list()
-        self._show_manage_view()
         self._update_control_states()
         self._announce_load("Link library loaded")
+        if self._library_has_missing_paths():
+            self._enter_remake_mode()
+        else:
+            self._show_manage_view()
 
     # ------------------------------------------------------------------
     # Manage view: generated file list
@@ -816,6 +842,9 @@ class App(ctk.CTk):
         self.update_links_btn.configure(
             state="normal" if (has_source and has_links) else "disabled"
         )
+        self.remake_btn.configure(
+            state="normal" if self.link_library is not None else "disabled"
+        )
 
     def _set_default_output_fields(self, source_path: str | None):
         if source_path:
@@ -865,23 +894,49 @@ class App(ctk.CTk):
             self.library_path = default_link_library_path(self.source_doc.path)
         return self.link_library
 
+    def _confirm_new_library_destination(self) -> bool:
+        """Ask before the first save replaces an existing sibling library."""
+        path = self.library_path
+        if not path or not os.path.exists(path):
+            return True
+        return messagebox.askyesno(
+            "Replace link library",
+            "A link library already exists at:\n"
+            f"{path}\n\n"
+            "Saving a new library will replace it and make the old one obsolete.\n\n"
+            "Continue?",
+        )
+
+    def _abandon_unsaved_library(self, creating: bool) -> None:
+        if not creating:
+            return
+        self.link_library = None
+        self.library_path = None
+        self.library_label.configure(text="Library: none")
+        self._update_control_states()
+
     def _update_links(self):
         if self.source_doc is None:
             messagebox.showwarning("No source file", "Please upload a source file first.")
             return
 
+        creating = self.link_library is None
         library = self._ensure_library()
         if library is None:
+            return
+        if creating and not self._confirm_new_library_destination():
+            self._abandon_unsaved_library(True)
             return
 
         try:
             update_library_source_file(library, self.source_doc)
+            saved_path = save_link_library(library, self.library_path)
         except Exception as exc:
+            self._abandon_unsaved_library(creating)
             messagebox.showerror("Update error", str(exc))
             self._set_status(f"Error: {exc}")
             return
 
-        saved_path = save_link_library(library, self.library_path)
         self.library_path = saved_path
         self.link_library = library
         self.library_label.configure(text=f"Library: {saved_path}")
@@ -897,9 +952,6 @@ class App(ctk.CTk):
         # In create mode self.doc is the source doc, so syncing stores the
         # current selections as the source default snapshot.
         self._sync_model()
-        library = self._ensure_library()
-        if library is None:
-            return
 
         output_dir = self.output_dir_entry.get().strip()
         output_name = self.output_name_entry.get().strip()
@@ -920,19 +972,27 @@ class App(ctk.CTk):
             messagebox.showwarning("Invalid output folder", "The selected output folder does not exist.")
             return
 
+        creating = self.link_library is None
+        library = self._ensure_library()
+        if library is None:
+            return
+        if creating and not self._confirm_new_library_destination():
+            self._abandon_unsaved_library(True)
+            return
+
         # Store the current source snapshot (no sibling rebuild on create).
         library.update_source_file(self.source_doc)
 
         output_path = os.path.join(output_dir, output_name)
         try:
             generated_file = library.create_generated_file(output_path, generate_pdf=generate_pdf)
+            library.add_generated_file(generated_file)
+            saved_path = save_link_library(library, self.library_path)
         except Exception as exc:
+            self._abandon_unsaved_library(creating)
             messagebox.showerror("Write error", str(exc))
             self._set_status(f"Error: {exc}")
             return
-        library.add_generated_file(generated_file)
-
-        saved_path = save_link_library(library, self.library_path)
         self.library_path = saved_path
         self.link_library = library
         self.library_label.configure(text=f"Library: {saved_path}")
@@ -977,6 +1037,273 @@ class App(ctk.CTk):
             self._set_status(f"Rebuilt: {output_path} and {generated_file.pdf_path}")
         else:
             self._set_status(f"Rebuilt: {output_path}")
+
+    # ------------------------------------------------------------------
+    # Remake files onto this machine
+    # ------------------------------------------------------------------
+
+    def _library_has_missing_paths(self) -> bool:
+        library = self.link_library
+        if library is None:
+            return False
+        source = library.source_path or library.source_file.path
+        if not source or not os.path.exists(source):
+            return True
+        return any(not os.path.exists(path) for path in library.links)
+
+    def _enter_remake_mode(self):
+        if self.link_library is None:
+            messagebox.showwarning("No link library", "Upload a link library first.")
+            return
+        self.editing_path = None
+        self._build_remake_rows()
+        self._show_remake_view()
+        self._set_status("Choose new locations, then write the files")
+
+    def _build_remake_rows(self):
+        for widget in self.remake_list_frame.winfo_children():
+            widget.destroy()
+        self._remake_rows = []
+
+        library = self.link_library
+        if library is None:
+            return
+
+        source_path = library.source_path or library.source_file.path
+        self._add_remake_row("source", source_path, "Source file")
+        for path in sorted(library.links):
+            self._add_remake_row("link", path, os.path.basename(path) or path)
+
+    def _add_remake_row(self, kind: str, old_path: str, title: str):
+        row_index = len(self._remake_rows)
+        row_frame = ctk.CTkFrame(self.remake_list_frame)
+        row_frame.grid(row=row_index, column=0, sticky="ew", padx=4, pady=4)
+        row_frame.grid_columnconfigure(1, weight=1)
+
+        title_label = ctk.CTkLabel(
+            row_frame, text=title, anchor="w",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        title_label.grid(row=0, column=0, columnspan=4, sticky="ew", padx=8, pady=(6, 0))
+
+        location_label = ctk.CTkLabel(
+            row_frame,
+            text=old_path or "No path stored",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        location_label.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8)
+
+        missing = not old_path or not os.path.exists(old_path)
+        badge_label = ctk.CTkLabel(
+            row_frame,
+            text="missing on disk" if missing else "on disk",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=VERSION_COLOR,
+        )
+        badge_label.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8)
+
+        ctk.CTkLabel(row_frame, text="New location:").grid(
+            row=3, column=0, padx=(8, 6), pady=(4, 8), sticky="w"
+        )
+        entry = ctk.CTkEntry(row_frame, placeholder_text="Choose a .tex path")
+        entry.grid(row=3, column=1, sticky="ew", padx=4, pady=(4, 8))
+        prefill = self._prefill_destination(old_path)
+        if prefill:
+            entry.insert(0, prefill)
+
+        row = {
+            "kind": kind,
+            "old_path": old_path,
+            "entry": entry,
+            "title_label": title_label,
+            "location_label": location_label,
+            "badge_label": badge_label,
+        }
+        ctk.CTkButton(
+            row_frame, text="Browse", width=80,
+            command=lambda r=row: self._browse_remake_destination(r),
+        ).grid(row=3, column=2, padx=(4, 4), pady=(4, 8))
+        ctk.CTkButton(
+            row_frame, text="Write", width=80,
+            command=lambda r=row: self._write_remake_row(r, r["entry"].get().strip()),
+        ).grid(row=3, column=3, padx=(4, 8), pady=(4, 8))
+
+        self._remake_rows.append(row)
+
+    @staticmethod
+    def _prefill_destination(old_path: str) -> str:
+        if not old_path:
+            return ""
+        directory = os.path.dirname(old_path)
+        if directory and os.path.isdir(directory):
+            return old_path
+        return os.path.basename(old_path)
+
+    def _browse_remake_destination(self, row: dict):
+        current = row["entry"].get().strip()
+        old_path = row["old_path"] or ""
+        initialfile = os.path.basename(current or old_path or "document.tex") or "document.tex"
+        candidate_dir = os.path.dirname(current) if current else os.path.dirname(old_path)
+        initialdir = candidate_dir if candidate_dir and os.path.isdir(candidate_dir) else os.getcwd()
+        path = filedialog.asksaveasfilename(
+            title="Choose new location",
+            defaultextension=".tex",
+            filetypes=[("LaTeX files", "*.tex"), ("All files", "*.*")],
+            initialfile=initialfile,
+            initialdir=initialdir,
+        )
+        if path:
+            self._set_remake_entry(row, path)
+
+    def _write_all_remakes(self):
+        if self.link_library is None:
+            messagebox.showwarning("No link library", "Upload a link library first.")
+            return
+        planned = [(row, row["entry"].get().strip()) for row in self._remake_rows]
+        if not any(destination for _, destination in planned):
+            messagebox.showwarning(
+                "No locations",
+                "Choose a new location for at least one file.",
+            )
+            return
+        wrote = 0
+        for row, destination in planned:
+            if not destination:
+                continue
+            if not self._write_remake_row(row, destination):
+                self._refresh_file_list()
+                self._update_control_states()
+                return
+            wrote += 1
+        self._refresh_file_list()
+        self._update_control_states()
+        self._set_status(f"Remade {wrote} file{'s' if wrote != 1 else ''}")
+
+    def _write_remake_row(self, row: dict, destination: str) -> bool:
+        if self.link_library is None or not self.library_path:
+            messagebox.showwarning("No link library", "Upload a link library first.")
+            return False
+        normalized = self._normalize_tex_destination(destination)
+        if normalized is None:
+            return False
+        if not self._confirm_replace_file(normalized):
+            self._set_status("Remake cancelled")
+            return False
+        if row["kind"] == "source":
+            return self._commit_remade_source(row, normalized)
+        return self._commit_remade_link(row, normalized)
+
+    def _normalize_tex_destination(self, raw: str) -> str | None:
+        destination = raw.strip()
+        if not destination:
+            messagebox.showwarning("No location", "Choose a location for this file.")
+            return None
+        if not os.path.dirname(destination):
+            messagebox.showwarning(
+                "No folder",
+                "Choose a folder for this file. A file name alone is not a location.",
+            )
+            return None
+        if not destination.lower().endswith(".tex"):
+            destination += ".tex"
+        parent = os.path.dirname(destination)
+        if not os.path.isdir(parent):
+            messagebox.showwarning("Invalid folder", "The selected folder does not exist.")
+            return None
+        return destination
+
+    def _confirm_replace_file(self, path: str) -> bool:
+        if not os.path.exists(path):
+            return True
+        return messagebox.askyesno(
+            "Replace file",
+            f"\"{os.path.basename(path)}\" already exists at:\n{path}\n\nReplace it?",
+        )
+
+    def _commit_remade_source(self, row: dict, destination: str) -> bool:
+        try:
+            written = self.link_library.write_source_file(destination)
+        except Exception as exc:
+            messagebox.showerror("Remake error", str(exc))
+            self._set_status(f"Error: {exc}")
+            return False
+        self.source_doc = self.link_library.source_file
+        self.doc = self.source_doc
+        self.editing_path = None
+        self.file_path = written
+        self.file_label.configure(text=f"Source: {written}")
+        row["old_path"] = written
+        self._set_remake_entry(row, written)
+        self._update_remake_row_labels(row)
+        if not self._save_open_library():
+            return False
+        self._refresh_file_list()
+        self._update_control_states()
+        self._set_status(f"Source written: {written}")
+        return True
+
+    def _commit_remade_link(self, row: dict, destination: str) -> bool:
+        try:
+            generated, pdf_error = self.link_library.relocate_generated_file(
+                row["old_path"], destination
+            )
+        except Exception as exc:
+            messagebox.showerror("Remake error", str(exc))
+            self._set_status(f"Error: {exc}")
+            return False
+        row["old_path"] = generated.path
+        row["title_label"].configure(text=os.path.basename(generated.path) or generated.path)
+        self._set_remake_entry(row, generated.path)
+        self._update_remake_row_labels(row)
+        if not self._save_open_library():
+            return False
+        self._refresh_file_list()
+        self._update_control_states()
+        if pdf_error:
+            messagebox.showerror(
+                "PDF error",
+                f"Wrote {generated.path}, but PDF generation failed.\n\n{pdf_error}",
+            )
+            self._set_status(f"Wrote {generated.path}, but PDF generation failed")
+            return False
+        if generated.pdf_path:
+            self._set_status(f"Regenerated: {generated.path} and {generated.pdf_path}")
+        else:
+            self._set_status(f"Regenerated: {generated.path}")
+        return True
+
+    def _save_open_library(self) -> bool:
+        """Persist the library the user opened. Never invent a sibling path."""
+        if self.link_library is None or not self.library_path:
+            messagebox.showerror(
+                "Library error",
+                "No link library file is open. Upload a link library before remaking files.",
+            )
+            return False
+        try:
+            saved_path = save_link_library(self.link_library, self.library_path)
+        except Exception as exc:
+            messagebox.showerror("Library error", str(exc))
+            self._set_status(f"Error: {exc}")
+            return False
+        self.library_path = saved_path
+        self.library_label.configure(text=f"Library: {saved_path}")
+        return True
+
+    @staticmethod
+    def _set_remake_entry(row: dict, path: str) -> None:
+        row["entry"].delete(0, "end")
+        row["entry"].insert(0, path)
+
+    @staticmethod
+    def _update_remake_row_labels(row: dict) -> None:
+        path = row["old_path"]
+        row["location_label"].configure(text=path or "No path stored")
+        missing = not path or not os.path.exists(path)
+        row["badge_label"].configure(text="missing on disk" if missing else "on disk")
 
     # ------------------------------------------------------------------
     # Helpers

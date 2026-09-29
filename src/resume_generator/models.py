@@ -591,6 +591,97 @@ class LinkLibrary:
 
         return generated_file
 
+    def write_source_file(self, output_path: str) -> str:
+        """Write the full source snapshot to ``output_path`` and retarget the library.
+
+        Every section and every version is emitted. The previous source file is
+        left in place.
+        """
+        from .assembler import assemble_source, write_tex
+
+        destination = _normalize_path(output_path)
+        if not destination:
+            raise ValueError("Choose a destination path for the source file.")
+        parent = Path(destination).parent
+        if not parent.is_dir():
+            raise ValueError(f"The destination folder does not exist: {parent}")
+        if any(
+            _normalize_path(key) == destination or generated.path == destination
+            for key, generated in self.links.items()
+        ):
+            raise ValueError("The source destination is already a generated file in this library.")
+
+        write_tex(assemble_source(self.source_file), destination)
+        rewritten = SourceFile.from_dict(self.source_file.to_dict())
+        if rewritten is None:
+            raise ValueError("Could not copy the source snapshot.")
+        rewritten.path = destination
+        self.update_source_file(rewritten)
+        return destination
+
+    def _lookup_link(self, path: str) -> tuple[str, GeneratedFile] | None:
+        normalized = _normalize_path(path)
+        if path in self.links:
+            return path, self.links[path]
+        if normalized in self.links:
+            return normalized, self.links[normalized]
+        for key, generated in self.links.items():
+            if _normalize_path(key) == normalized or generated.path == normalized:
+                return key, generated
+        return None
+
+    def relocate_generated_file(
+        self, old_path: str, new_path: str
+    ) -> tuple[GeneratedFile, str | None]:
+        """Rewrite one generated file at ``new_path`` and rekey the library.
+
+        The file at ``old_path`` is not deleted. When PDF compilation fails, the
+        ``.tex`` is kept, ``pdf_path`` is left empty, and the error text is
+        returned as the second value after the library has been updated.
+        """
+        found = self._lookup_link(old_path)
+        if found is None:
+            raise KeyError(f"Generated file is not in the library: {old_path}")
+        old_key, existing = found
+
+        destination = _normalize_path(new_path)
+        if not destination:
+            raise ValueError("Choose a destination path for the generated file.")
+        parent = Path(destination).parent
+        if not parent.is_dir():
+            raise ValueError(f"The destination folder does not exist: {parent}")
+        if destination == _normalize_path(self.source_path):
+            raise ValueError("A generated file cannot use the source file path.")
+
+        for key, other in self.links.items():
+            if key == old_key:
+                continue
+            if _normalize_path(key) == destination or other.path == destination:
+                raise ValueError(f"Another generated file is already stored at {destination}")
+
+        want_pdf = bool(existing.pdf_path)
+        pdf_error: str | None = None
+        try:
+            generated = self.create_generated_file(
+                destination,
+                template=existing,
+                generate_pdf=want_pdf,
+            )
+        except (RuntimeError, FileNotFoundError) as exc:
+            if not want_pdf:
+                raise
+            pdf_error = str(exc)
+            generated = self.create_generated_file(
+                destination,
+                template=existing,
+                generate_pdf=False,
+            )
+
+        if old_key != generated.path:
+            self.remove_generated_file(old_key, delete_from_disk=False)
+        self.add_generated_file(generated)
+        return generated, pdf_error
+
     def refresh_generated_files(self) -> None:
         refreshed: dict[str, GeneratedFile] = {}
         for gen_path, generated_file in self.links.items():
