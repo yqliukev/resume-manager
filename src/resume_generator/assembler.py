@@ -1,9 +1,9 @@
 import subprocess
 from pathlib import Path
-from .models import ResumeDocument, SourceFile
+from .models import GeneratedFile, SourceFile, build_generated_file
 from .parser import parse_file
 
-def assemble(doc: ResumeDocument) -> str:
+def assemble(doc: GeneratedFile) -> str:
     """Build the output .tex string from the document model."""
     parts = [doc.preamble, doc.header]
 
@@ -24,13 +24,13 @@ def assemble(doc: ResumeDocument) -> str:
     return ''.join(parts)
 
 
-def assemble_source(doc: ResumeDocument) -> str:
+def assemble_source(doc: SourceFile) -> str:
     """Rebuild a master .tex file from the snapshot.
 
-    Unlike ``assemble``, this keeps every section and every version, including
-    entries the user has unchecked. Skills versions whose ``@item`` comment was
-    stored separately from ``raw_text`` get that comment written back so a
-    later parse recovers the same item and version ids.
+    Unlike ``assemble``, this writes every section, entry, and version. Skills
+    versions whose ``@item`` comment was stored separately from ``raw_text``
+    get that comment written back so a later parse recovers the same item and
+    version ids.
     """
     parts = [doc.preamble, doc.header]
     for section in doc.sections:
@@ -72,7 +72,7 @@ def _source_version_text(
 def parse_and_assemble_source(source_path: str) -> tuple[SourceFile, str]:
     """Parse source via persistence integration and return (doc, assembled_tex)."""
     doc = parse_file(source_path)
-    return doc, assemble(doc)
+    return doc, assemble(build_generated_file(doc))
 
 
 def write_tex(content: str, path: str) -> None:

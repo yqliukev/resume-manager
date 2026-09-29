@@ -1,10 +1,24 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 DEFAULT_VERSION_ID = "default"
+
+
+def _parse_list[T](raw: object, parse: Callable[[dict], T | None]) -> list[T]:
+    if not isinstance(raw, list):
+        return []
+    items: list[T] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        parsed = parse(item)
+        if parsed is not None:
+            items.append(parsed)
+    return items
 
 
 @dataclass
@@ -38,64 +52,30 @@ class EntryVersion:
 
 
 @dataclass
-class Entry:
+class SourceEntry:
     '''
-      Item within a section, e.g. "Backend Developer @ Ground News".
-      Each "skill line" is an item. An item groups one or more versions;
-      only the active version is emitted when generating a file.
+      Item within a source section, e.g. "Backend Developer @ Ground News".
+      Each "skill line" is an item. An item groups one or more versions in
+      source order; the first version is the default for new generated files.
     '''
     item_id: str                 # grouping key (explicit @item, else version label)
     display_label: str           # clean parent text for UI tree
-    versions: list["EntryVersion"] = field(default_factory=list)
-    selected: bool = True        # include/exclude the whole item
-    active_version_id: str = DEFAULT_VERSION_ID
-
-    def resolve_active_version_id(self) -> str:
-        '''Return a version id that actually exists, falling back gracefully.'''
-        ids = [version.version_id for version in self.versions]
-        if self.active_version_id in ids:
-            return self.active_version_id
-        if DEFAULT_VERSION_ID in ids:
-            return DEFAULT_VERSION_ID
-        return ids[0] if ids else self.active_version_id
-
-    def active_version(self) -> "EntryVersion | None":
-        target = self.resolve_active_version_id()
-        for version in self.versions:
-            if version.version_id == target:
-                return version
-        return self.versions[0] if self.versions else None
-
-    @property
-    def active_raw_text(self) -> str:
-        version = self.active_version()
-        return version.raw_text if version is not None else ""
+    versions: list[EntryVersion]
 
     def to_dict(self) -> dict:
         return {
             "item_id": self.item_id,
             "display_label": self.display_label,
-            "selected": self.selected,
-            "active_version_id": self.active_version_id,
             "versions": [version.to_dict() for version in self.versions],
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Entry | None":
+    def from_dict(cls, data: dict) -> "SourceEntry | None":
         display_label = data.get("display_label")
         if not isinstance(display_label, str):
             return None
 
-        raw_versions = data.get("versions")
-        versions: list[EntryVersion] = []
-        if isinstance(raw_versions, list):
-            for raw_version in raw_versions:
-                if not isinstance(raw_version, dict):
-                    continue
-                version = EntryVersion.from_dict(raw_version)
-                if version is not None:
-                    versions.append(version)
-
+        versions = _parse_list(data.get("versions"), EntryVersion.from_dict)
         if not versions:
             # Backward compatibility: old schema stored a single raw_text.
             raw_text = data.get("raw_text")
@@ -113,30 +93,79 @@ class Entry:
         if not isinstance(item_id, str) or not item_id:
             item_id = display_label
 
-        active_version_id = data.get("active_version_id")
-        if not isinstance(active_version_id, str) or not active_version_id:
-            active_version_id = versions[0].version_id
+        return cls(item_id=item_id, display_label=display_label, versions=versions)
 
-        selected = data.get("selected", True)
+
+@dataclass
+class GeneratedEntry(SourceEntry):
+    '''
+      A source item plus the choices made for one generated file: whether it
+      is included, and which version is emitted.
+    '''
+    active_version_id: str
+    selected: bool = True        # include/exclude the whole item
+
+    @classmethod
+    def from_source(
+        cls,
+        entry: SourceEntry,
+        preferred_version: str | None = None,
+        selected: bool = True,
+    ) -> "GeneratedEntry":
         return cls(
-            item_id=item_id,
-            display_label=display_label,
-            versions=versions,
-            selected=bool(selected),
-            active_version_id=active_version_id,
+            item_id=entry.item_id,
+            display_label=entry.display_label,
+            versions=_clone_versions(entry.versions),
+            active_version_id=_pick_active_version_id(entry.versions, preferred_version),
+            selected=selected,
+        )
+
+    def active_version(self) -> EntryVersion | None:
+        for version in self.versions:
+            if version.version_id == self.active_version_id:
+                return version
+        return self.versions[0] if self.versions else None
+
+    def resolve_active_version_id(self) -> str:
+        '''Return a version id that actually exists, falling back to the first.'''
+        version = self.active_version()
+        return version.version_id if version is not None else self.active_version_id
+
+    @property
+    def active_raw_text(self) -> str:
+        version = self.active_version()
+        return version.raw_text if version is not None else ""
+
+    def to_dict(self) -> dict:
+        return {
+            "item_id": self.item_id,
+            "display_label": self.display_label,
+            "selected": self.selected,
+            "active_version_id": self.active_version_id,
+            "versions": [version.to_dict() for version in self.versions],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GeneratedEntry | None":
+        entry = SourceEntry.from_dict(data)
+        if entry is None:
+            return None
+        active_version_id = data.get("active_version_id")
+        return cls.from_source(
+            entry,
+            preferred_version=active_version_id if isinstance(active_version_id, str) else None,
+            selected=bool(data.get("selected", True)),
         )
 
 
 @dataclass
-class Section:
+class SectionLayout:
     ''' Document section, e.g. "Work Experience". '''
     name: str            # e.g. "Work Experience"
     section_type: str    # "standard" | "skills"
     raw_header: str      # "\section{...}" line verbatim (may include preceding comment)
     list_prefix: str     # lines between header and first entry
     list_suffix: str     # lines after last entry (before next section)
-    entries: list[Entry] = field(default_factory=list)
-    selected: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -145,42 +174,54 @@ class Section:
             "raw_header": self.raw_header,
             "list_prefix": self.list_prefix,
             "list_suffix": self.list_suffix,
-            "selected": self.selected,
-            "entries": [entry.to_dict() for entry in self.entries],
         }
 
+
+def _section_layout_from_dict(data: dict) -> dict[str, str] | None:
+    keys = ("name", "section_type", "raw_header", "list_prefix", "list_suffix")
+    layout = {key: data.get(key) for key in keys}
+    if not all(isinstance(value, str) for value in layout.values()):
+        return None
+    return layout  # type: ignore[return-value]
+
+
+@dataclass
+class SourceSection(SectionLayout):
+    entries: list[SourceEntry] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        data = super().to_dict()
+        data["entries"] = [entry.to_dict() for entry in self.entries]
+        return data
+
     @classmethod
-    def from_dict(cls, data: dict) -> "Section | None":
-        name = data.get("name")
-        section_type = data.get("section_type")
-        raw_header = data.get("raw_header")
-        list_prefix = data.get("list_prefix")
-        list_suffix = data.get("list_suffix")
-
-        if not isinstance(name, str) or not isinstance(section_type, str):
+    def from_dict(cls, data: dict) -> "SourceSection | None":
+        layout = _section_layout_from_dict(data)
+        if layout is None:
             return None
-        if not isinstance(raw_header, str) or not isinstance(list_prefix, str) or not isinstance(list_suffix, str):
+        return cls(**layout, entries=_parse_list(data.get("entries"), SourceEntry.from_dict))
+
+
+@dataclass
+class GeneratedSection(SectionLayout):
+    entries: list[GeneratedEntry] = field(default_factory=list)
+    selected: bool = True
+
+    def to_dict(self) -> dict:
+        data = super().to_dict()
+        data["selected"] = self.selected
+        data["entries"] = [entry.to_dict() for entry in self.entries]
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GeneratedSection | None":
+        layout = _section_layout_from_dict(data)
+        if layout is None:
             return None
-
-        raw_entries = data.get("entries", [])
-        entries: list[Entry] = []
-        if isinstance(raw_entries, list):
-            for raw_entry in raw_entries:
-                if not isinstance(raw_entry, dict):
-                    continue
-                entry = Entry.from_dict(raw_entry)
-                if entry is not None:
-                    entries.append(entry)
-
-        selected = data.get("selected", True)
         return cls(
-            name=name,
-            section_type=section_type,
-            raw_header=raw_header,
-            list_prefix=list_prefix,
-            list_suffix=list_suffix,
-            entries=entries,
-            selected=bool(selected),
+            **layout,
+            entries=_parse_list(data.get("entries"), GeneratedEntry.from_dict),
+            selected=bool(data.get("selected", True)),
         )
 
 
@@ -189,9 +230,7 @@ class ResumeDocument(ABC):
     ''' Parameters also called Zones '''
     preamble: str           # everything up to (not including) \begin{center}
     header: str             # \begin{center}...\end{center} block (inclusive)
-    sections: list[Section] = field(default_factory=list)
     trailing: str = ""      # \end{document} and any trailing content
-    parse_warnings: list[str] = field(default_factory=list, compare=False, repr=False)  # not persisted
 
     @property
     @abstractmethod
@@ -203,7 +242,6 @@ class ResumeDocument(ABC):
             "preamble": self.preamble,
             "header": self.header,
             "trailing": self.trailing,
-            "sections": [section.to_dict() for section in self.sections],
         }
     
 def _normalize_path(path: str) -> str:
@@ -212,29 +250,12 @@ def _normalize_path(path: str) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
-def _document_fields_from_dict(raw: dict) -> tuple[str | None, str | None, str | None, list[Section]]:
-    preamble = raw.get("preamble")
-    if not isinstance(preamble, str):
-        preamble = None
-
-    header = raw.get("header")
-    if not isinstance(header, str):
-        header = None
-
-    trailing = raw.get("trailing")
-    if not isinstance(trailing, str):
-        trailing = None
-
-    raw_sections = raw.get("sections")
-    sections: list[Section] = []
-    if isinstance(raw_sections, list):
-        for raw_section in raw_sections:
-            if isinstance(raw_section, dict):
-                section = Section.from_dict(raw_section)
-                if section is not None:
-                    sections.append(section)
-
-    return preamble, header, trailing, sections
+def _document_fields_from_dict(raw: dict) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for key in ("preamble", "header", "trailing"):
+        value = raw.get(key)
+        fields[key] = value if isinstance(value, str) else ""
+    return fields
 
 
 def _utc_now_iso() -> str:
@@ -243,13 +264,16 @@ def _utc_now_iso() -> str:
 
 @dataclass
 class SourceFile(ResumeDocument):
+    sections: list[SourceSection] = field(default_factory=list)
     path: str = ""
+    parse_warnings: list[str] = field(default_factory=list, compare=False, repr=False)  # not persisted
 
     def __post_init__(self) -> None:
         self.path = _normalize_path(self.path)
 
     def to_dict(self) -> dict:
         data = super().to_dict()
+        data["sections"] = [section.to_dict() for section in self.sections]
         data["path"] = self.path
         data["document_type"] = self.document_type
         return data
@@ -258,16 +282,13 @@ class SourceFile(ResumeDocument):
     def from_dict(cls, raw: dict) -> "SourceFile | None":
         if not isinstance(raw, dict):
             return None
-        preamble, header, trailing, sections = _document_fields_from_dict(raw)
         path = raw.get("path")
         if not isinstance(path, str):
             path = ""
         return cls(
+            **_document_fields_from_dict(raw),
+            sections=_parse_list(raw.get("sections"), SourceSection.from_dict),
             path=path,
-            preamble=preamble or "",
-            header=header or "",
-            sections=sections,
-            trailing=trailing or "",
         )
 
     @property
@@ -277,6 +298,7 @@ class SourceFile(ResumeDocument):
 
 @dataclass
 class GeneratedFile(ResumeDocument):
+    sections: list[GeneratedSection] = field(default_factory=list)
     path: str = ""
     pdf_path: str = ""
 
@@ -286,6 +308,7 @@ class GeneratedFile(ResumeDocument):
 
     def to_dict(self) -> dict:
         data = super().to_dict()
+        data["sections"] = [section.to_dict() for section in self.sections]
         data["path"] = self.path
         data["pdf_path"] = self.pdf_path
         data["document_type"] = self.document_type
@@ -295,7 +318,6 @@ class GeneratedFile(ResumeDocument):
     def from_dict(cls, raw: dict) -> "GeneratedFile | None":
         if not isinstance(raw, dict):
             return None
-        preamble, header, trailing, sections = _document_fields_from_dict(raw)
         path = raw.get("path")
         if not isinstance(path, str):
             path = ""
@@ -303,12 +325,10 @@ class GeneratedFile(ResumeDocument):
         if not isinstance(pdf_path, str):
             pdf_path = ""
         return cls(
+            **_document_fields_from_dict(raw),
+            sections=_parse_list(raw.get("sections"), GeneratedSection.from_dict),
             path=path,
             pdf_path=pdf_path,
-            preamble=preamble or "",
-            header=header or "",
-            sections=sections,
-            trailing=trailing or "",
         )
 
     @property
@@ -316,7 +336,7 @@ class GeneratedFile(ResumeDocument):
         return "generated"
 
 
-def _section_entries_map(document: ResumeDocument) -> dict[str, set[str]]:
+def _section_entries_map(document: SourceFile | GeneratedFile) -> dict[str, set[str]]:
     return {
         section.name: {entry.item_id for entry in section.entries}
         for section in document.sections
@@ -336,10 +356,8 @@ def _clone_versions(versions: list[EntryVersion]) -> list[EntryVersion]:
 
 def _pick_active_version_id(versions: list[EntryVersion], preferred: str | None) -> str:
     ids = [version.version_id for version in versions]
-    if preferred in ids:
-        return preferred  # type: ignore[return-value]
-    if DEFAULT_VERSION_ID in ids:
-        return DEFAULT_VERSION_ID
+    if preferred is not None and preferred in ids:
+        return preferred
     return ids[0] if ids else DEFAULT_VERSION_ID
 
 
@@ -376,58 +394,58 @@ def default_link_library_path(source_path: str) -> str:
     return str(source_file.with_name(f"{source_file.stem}.resume-links.json"))
 
 
-def merge_source_document(current: SourceFile, template: "ResumeDocument | None" = None) -> SourceFile:
-    if template is None:
-        return SourceFile.from_dict(current.to_dict()) or current
+def build_generated_file(
+    source: SourceFile,
+    template: GeneratedFile | None = None,
+    path: str = "",
+) -> GeneratedFile:
+    """Lay the choices from ``template`` over the current source structure.
 
-    template_sections = {section.name: section for section in template.sections}
-    merged_sections: list[Section] = []
+    Nothing is written to disk. Sections and entries that ``template`` does not
+    know about (all of them when there is no template) start selected, with
+    the first version of each item active.
+    """
+    template_sections = {section.name: section for section in template.sections} if template else {}
+    sections: list[GeneratedSection] = []
 
-    for current_section in current.sections:
-        template_section = template_sections.get(current_section.name)
-        selected = template_section.selected if template_section is not None else True
-
+    for source_section in source.sections:
+        template_section = template_sections.get(source_section.name)
         template_entries = {
             entry.item_id: entry for entry in template_section.entries
         } if template_section is not None else {}
-        merged_entries: list[Entry] = []
 
-        for current_entry in current_section.entries:
-            template_entry = template_entries.get(current_entry.item_id)
-            entry_selected = template_entry.selected if template_entry is not None else True
-            preferred_version = (
-                template_entry.active_version_id if template_entry is not None
-                else current_entry.active_version_id
-            )
-            versions = _clone_versions(current_entry.versions)
-            merged_entries.append(
-                Entry(
-                    item_id=current_entry.item_id,
-                    display_label=current_entry.display_label,
-                    versions=versions,
-                    selected=entry_selected,
-                    active_version_id=_pick_active_version_id(versions, preferred_version),
+        entries: list[GeneratedEntry] = []
+        for source_entry in source_section.entries:
+            template_entry = template_entries.get(source_entry.item_id)
+            if template_entry is None:
+                entries.append(GeneratedEntry.from_source(source_entry))
+            else:
+                entries.append(
+                    GeneratedEntry.from_source(
+                        source_entry,
+                        preferred_version=template_entry.active_version_id,
+                        selected=template_entry.selected,
+                    )
                 )
-            )
 
-        merged_sections.append(
-            Section(
-                name=current_section.name,
-                section_type=current_section.section_type,
-                raw_header=current_section.raw_header,
-                list_prefix=current_section.list_prefix,
-                list_suffix=current_section.list_suffix,
-                entries=merged_entries,
-                selected=selected,
+        sections.append(
+            GeneratedSection(
+                name=source_section.name,
+                section_type=source_section.section_type,
+                raw_header=source_section.raw_header,
+                list_prefix=source_section.list_prefix,
+                list_suffix=source_section.list_suffix,
+                entries=entries,
+                selected=template_section.selected if template_section is not None else True,
             )
         )
 
-    return SourceFile(
-        path=current.path,
-        preamble=current.preamble,
-        header=current.header,
-        sections=merged_sections,
-        trailing=current.trailing,
+    return GeneratedFile(
+        path=path,
+        preamble=source.preamble,
+        header=source.header,
+        sections=sections,
+        trailing=source.trailing,
     )
 
 
@@ -523,61 +541,7 @@ class LinkLibrary:
     ) -> GeneratedFile:
         from .assembler import assemble, compile_pdf, write_tex
 
-        source = self.source_file
-        template_sections = {section.name: section for section in template.sections} if template else {}
-        sections: list[Section] = []
-
-        for source_section in source.sections:
-            template_section = template_sections.get(source_section.name)
-            selected = template_section.selected if template_section is not None else source_section.selected
-            if template is not None and template_section is None:
-                selected = True
-
-            template_entries = {
-                entry.item_id: entry for entry in template_section.entries
-            } if template_section is not None else {}
-            entries: list[Entry] = []
-
-            for source_entry in source_section.entries:
-                template_entry = template_entries.get(source_entry.item_id)
-                entry_selected = template_entry.selected if template_entry is not None else source_entry.selected
-                preferred_version = (
-                    template_entry.active_version_id if template_entry is not None
-                    else source_entry.active_version_id
-                )
-                if template is not None and template_entry is None:
-                    entry_selected = True
-
-                versions = _clone_versions(source_entry.versions)
-                entries.append(
-                    Entry(
-                        item_id=source_entry.item_id,
-                        display_label=source_entry.display_label,
-                        versions=versions,
-                        selected=entry_selected,
-                        active_version_id=_pick_active_version_id(versions, preferred_version),
-                    )
-                )
-
-            sections.append(
-                Section(
-                    name=source_section.name,
-                    section_type=source_section.section_type,
-                    raw_header=source_section.raw_header,
-                    list_prefix=source_section.list_prefix,
-                    list_suffix=source_section.list_suffix,
-                    entries=entries,
-                    selected=selected,
-                )
-            )
-
-        generated_file = GeneratedFile(
-            path=output_path,
-            preamble=source.preamble,
-            header=source.header,
-            sections=sections,
-            trailing=source.trailing,
-        )
+        generated_file = build_generated_file(self.source_file, template, output_path)
 
         write_tex(assemble(generated_file), output_path)
 

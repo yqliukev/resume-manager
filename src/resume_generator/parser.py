@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from .models import DEFAULT_VERSION_ID, Entry, EntryVersion, Section, SourceFile
+from .models import DEFAULT_VERSION_ID, EntryVersion, SourceEntry, SourceFile, SourceSection
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +35,9 @@ def _extract_markers(raw_text: str) -> tuple[str | None, str | None]:
     return item_id or None, version_id or None
 
 
-def _group_candidates(candidates: list[_Candidate]) -> tuple[list[Entry], list[str]]:
+def _group_candidates(candidates: list[_Candidate]) -> tuple[list[SourceEntry], list[str]]:
     """Group same-@item blocks into versioned entries; leave unmarked standalone."""
-    entries: list[Entry] = []
+    entries: list[SourceEntry] = []
     warnings: list[str] = []
     index_by_item: dict[str, int] = {}
 
@@ -77,19 +77,14 @@ def _group_candidates(candidates: list[_Candidate]) -> tuple[list[Entry], list[s
             item_id = candidate.display_label
             parent_label = candidate.display_label
 
-        entry = Entry(
+        entry = SourceEntry(
             item_id=item_id,  # type: ignore[arg-type]
             display_label=parent_label,  # type: ignore[arg-type]
             versions=[version],
-            selected=True,
-            active_version_id=version_id,
         )
         if has_marker:
             index_by_item[item_id] = len(entries)  # type: ignore[index]
         entries.append(entry)
-
-    for entry in entries:
-        entry.active_version_id = entry.versions[0].version_id
 
     return entries, warnings
 
@@ -472,7 +467,7 @@ def _build_skills_label(raw_text: str) -> str:
 
 def parse_section_chunk(
     header_lines: list[str], content_lines: list[str]
-) -> tuple[Section, list[str]]:
+) -> tuple[SourceSection, list[str]]:
     raw_header = ''.join(header_lines)
 
     # Extract section name
@@ -496,7 +491,7 @@ def parse_section_chunk(
     entries, warnings = _group_candidates(candidates)
     warnings = [f"[{name}] {message}" for message in warnings]
 
-    section = Section(
+    section = SourceSection(
         name=name,
         section_type=section_type,
         raw_header=raw_header,
@@ -514,7 +509,7 @@ def parse_file(path: str) -> SourceFile:
     preamble, header, body_lines, trailing = zone_extract(lines)
     chunks = section_split(body_lines)
 
-    sections: list[Section] = []
+    sections: list[SourceSection] = []
     warnings: list[str] = []
     for header_lines, content_lines in chunks:
         section, section_warnings = parse_section_chunk(header_lines, content_lines)
