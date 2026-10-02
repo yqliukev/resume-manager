@@ -54,4 +54,5 @@ The JSON snapshot is the source of truth for the relationship between one master
 - Loading a source file creates an in-memory `SourceFile` and clears any open library.
 - Clicking `Update Links` writes the current source snapshot into the open link library JSON file.
 - Clicking `Generate` creates a new `GeneratedFile`, writes it to disk as `.tex`, adds it to the link library, and saves the JSON file.
+- Clicking `Rebuild` on the edit page stores the current (possibly refreshed) source snapshot in the library and rewrites only the file being edited.
 - The first save of a new library uses the sibling `.resume-links.json` path. Replacing an existing file there requires confirmation, and that is when the previous library becomes obsolete.
