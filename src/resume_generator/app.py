@@ -998,18 +998,23 @@ class App(ctk.CTk):
             self._set_status(f"Generated: {output_path}")
 
     def _rebuild(self):
-        if self.link_library is None or self.editing_path is None:
+        if self.link_library is None or self.editing_path is None or self.source_doc is None:
             return
 
         self._sync_model()
         generate_pdf = bool(self.generate_pdf_var.get())
         output_path = self.editing_path
 
+        # create_generated_file builds from the library's snapshot, which a
+        # refresh does not touch; store the current source (no sibling rebuild).
+        previous_source = self.link_library.source_file
+        self.link_library.update_source_file(self.source_doc)
         try:
             generated_file = self.link_library.create_generated_file(
                 output_path, template=self.doc, generate_pdf=generate_pdf
             )
         except Exception as exc:
+            self.link_library.update_source_file(previous_source)
             messagebox.showerror("Rebuild error", str(exc))
             self._set_status(f"Error: {exc}")
             return
